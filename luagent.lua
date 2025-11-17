@@ -3,6 +3,7 @@
 
   Inspired by Pydantic AI, this library provides:
   - Structured inputs/outputs with JSON schema validation
+  - Streaming support with real-time callbacks
   - Dynamic prompts (static or function-based)
   - Tool/function calling
   - OpenAI-compatible API support
@@ -30,7 +31,18 @@
       tools = {...}
     })
 
+    -- Run with or without streaming
     local result = agent:run("Hello!", { deps = {...} })
+
+    -- Stream responses
+    local result = agent:run("Hello!", {
+      stream = true,
+      on_chunk = function(chunk_type, data)
+        if chunk_type == "content" then
+          io.write(data.content)
+        end
+      end
+    })
 --]]
 
 local luagent = {}
@@ -86,6 +98,8 @@ local luagent = {}
 ---@field deps? table
 ---@field message_history? Message[]
 ---@field max_iterations? number
+---@field stream? boolean
+---@field on_chunk? fun(chunk_type: string, data: any)
 
 ---@class RunResult
 ---@field data any
@@ -254,6 +268,39 @@ local function deep_copy(obj)
 		copy[k] = deep_copy(v)
 	end
 	return copy
+end
+
+---Parse Server-Sent Events (SSE) format from streaming response
+---@param sse_text string
+---@return table[] chunks Array of parsed JSON chunks
+local function parse_sse(sse_text)
+	local chunks = {}
+	local lines = {}
+
+	-- Split by newlines
+	for line in sse_text:gmatch("[^\r\n]+") do
+		table.insert(lines, line)
+	end
+
+	for _, line in ipairs(lines) do
+		-- SSE lines start with "data: "
+		if line:match("^data: ") then
+			local data = line:sub(7) -- Remove "data: " prefix
+
+			-- Check for [DONE] marker
+			if data == "[DONE]" then
+				break
+			end
+
+			-- Parse JSON chunk
+			local ok, chunk = pcall(json.decode, data)
+			if ok then
+				table.insert(chunks, chunk)
+			end
+		end
+	end
+
+	return chunks
 end
 
 ---Detects available AI provider based on environment variables.
@@ -491,8 +538,10 @@ end
 ---@param messages Message[]
 ---@param tools table[]
 ---@param deps? table
+---@param stream? boolean
+---@param on_chunk? fun(chunk_type: string, data: any)
 ---@return table
-function Agent:_call_openai_api(messages, tools, deps)
+function Agent:_call_openai_api(messages, tools, deps, stream, on_chunk)
 	local url = self.base_url .. "/chat/completions"
 
 	-- Build request body
@@ -513,16 +562,25 @@ function Agent:_call_openai_api(messages, tools, deps)
 		request_body.tools = tools
 	end
 
-	-- Add structured output if schema is provided
-	if self.output_schema then
-		request_body.response_format = {
-			type = "json_schema",
-			json_schema = {
-				name = "output",
-				strict = true,
-				schema = self.output_schema,
-			},
-		}
+	-- Add streaming if requested
+	if stream then
+		request_body.stream = true
+		-- Note: structured output with json_schema is not compatible with streaming in OpenAI API
+		if self.output_schema then
+			error("Streaming is not compatible with output_schema (json_schema response format)")
+		end
+	else
+		-- Add structured output if schema is provided (only for non-streaming)
+		if self.output_schema then
+			request_body.response_format = {
+				type = "json_schema",
+				json_schema = {
+					name = "output",
+					strict = true,
+					schema = self.output_schema,
+				},
+			}
+		end
 	end
 
 	local body_str = json.encode(request_body)
@@ -547,7 +605,135 @@ function Agent:_call_openai_api(messages, tools, deps)
 		error("OpenAI API error (status " .. status .. "): " .. response_body)
 	end
 
-	return json.decode(response_body)
+	-- Handle streaming response
+	if stream and on_chunk then
+		return self:_process_streaming_response(response_body, on_chunk)
+	else
+		return json.decode(response_body)
+	end
+end
+
+---Process streaming response from OpenAI API
+---@param sse_text string
+---@param on_chunk fun(chunk_type: string, data: any)
+---@return table Complete response object
+function Agent:_process_streaming_response(sse_text, on_chunk)
+	local chunks = parse_sse(sse_text)
+
+	-- Accumulated state
+	local accumulated_content = ""
+	local accumulated_tool_calls = {} -- indexed by tool call index
+	local response_id = nil
+	local response_model = nil
+	local finish_reason = nil
+
+	for _, chunk in ipairs(chunks) do
+		if chunk.id then
+			response_id = chunk.id
+		end
+		if chunk.model then
+			response_model = chunk.model
+		end
+
+		local choice = chunk.choices and chunk.choices[1]
+		if choice then
+			local delta = choice.delta
+
+			if choice.finish_reason then
+				finish_reason = choice.finish_reason
+			end
+
+			-- Handle content delta
+			if delta and delta.content then
+				accumulated_content = accumulated_content .. delta.content
+				on_chunk("content", { content = delta.content })
+			end
+
+			-- Handle tool call deltas
+			if delta and delta.tool_calls then
+				for _, tool_call_delta in ipairs(delta.tool_calls) do
+					local index = tool_call_delta.index
+
+					-- Initialize tool call if this is the first chunk
+					if not accumulated_tool_calls[index] then
+						accumulated_tool_calls[index] = {
+							id = tool_call_delta.id or "",
+							type = tool_call_delta.type or "function",
+							["function"] = {
+								name = "",
+								arguments = "",
+							},
+						}
+					end
+
+					local acc_tool_call = accumulated_tool_calls[index]
+
+					-- Update ID if provided
+					if tool_call_delta.id then
+						acc_tool_call.id = tool_call_delta.id
+						on_chunk("tool_call_start", {
+							index = index,
+							id = tool_call_delta.id,
+						})
+					end
+
+					-- Accumulate function name
+					if tool_call_delta["function"] and tool_call_delta["function"].name then
+						acc_tool_call["function"].name = acc_tool_call["function"].name
+							.. tool_call_delta["function"].name
+					end
+
+					-- Accumulate function arguments
+					if tool_call_delta["function"] and tool_call_delta["function"].arguments then
+						acc_tool_call["function"].arguments = acc_tool_call["function"].arguments
+							.. tool_call_delta["function"].arguments
+						on_chunk("tool_call_delta", {
+							index = index,
+							arguments = tool_call_delta["function"].arguments,
+						})
+					end
+				end
+			end
+		end
+	end
+
+	-- Notify about tool call completion
+	for index, tool_call in pairs(accumulated_tool_calls) do
+		on_chunk("tool_call_end", {
+			index = index,
+			tool_call = tool_call,
+		})
+	end
+
+	-- Convert accumulated_tool_calls from sparse table to array
+	local tool_calls_array = nil
+	if next(accumulated_tool_calls) then
+		tool_calls_array = {}
+		for _, tool_call in pairs(accumulated_tool_calls) do
+			table.insert(tool_calls_array, tool_call)
+		end
+	end
+
+	-- Build complete response in OpenAI format
+	local complete_response = {
+		id = response_id,
+		object = "chat.completion",
+		created = os.time(),
+		model = response_model,
+		choices = {
+			{
+				index = 0,
+				message = {
+					role = "assistant",
+					content = accumulated_content ~= "" and accumulated_content or nil,
+					tool_calls = tool_calls_array,
+				},
+				finish_reason = finish_reason,
+			},
+		},
+	}
+
+	return complete_response
 end
 
 ---@param tool_call ToolCall
@@ -618,7 +804,7 @@ function Agent:run(prompt, options)
 		iteration = iteration + 1
 
 		-- Call OpenAI API
-		local response = self:_call_openai_api(messages, tools, deps)
+		local response = self:_call_openai_api(messages, tools, deps, options.stream, options.on_chunk)
 
 		local choice = response.choices[1]
 		local message = choice.message

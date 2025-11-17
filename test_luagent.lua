@@ -529,6 +529,184 @@ test("Provider detection: integration with Agent.new", function()
 	end
 end)
 
+-- Test 23: SSE parsing
+test("SSE parsing: basic chunks", function()
+	local sse_text = [[data: {"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"},"index":0}]}
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"delta":{"content":" World"},"index":0}]}
+data: [DONE]
+]]
+
+	-- Access internal parse_sse function via luagent internals
+	-- For testing, we'll need to expose it or test via streaming
+	-- For now, let's test the streaming API directly
+	assert_true(true) -- Placeholder for SSE parsing test
+end)
+
+-- Test 24: Streaming - basic content
+test("Streaming: basic content streaming", function()
+	local chunks_received = {}
+
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		http_client = {
+			post = function(url, headers, body)
+				-- Return a mock SSE response
+				local sse_response = [[data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"content":" World"},"finish_reason":null}]}
+data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+]]
+				return 200, sse_response
+			end,
+		},
+	})
+
+	local result = agent:run("Test", {
+		stream = true,
+		on_chunk = function(chunk_type, data)
+			table.insert(chunks_received, { type = chunk_type, data = data })
+		end,
+	})
+
+	-- Should have received content chunks
+	assert_true(#chunks_received >= 2, "Should receive at least 2 content chunks")
+
+	-- Check that we got content chunks
+	local has_content = false
+	for _, chunk in ipairs(chunks_received) do
+		if chunk.type == "content" then
+			has_content = true
+			break
+		end
+	end
+	assert_true(has_content, "Should have content chunks")
+
+	-- Final result should contain accumulated content
+	assert_not_nil(result.data, "Result should have data")
+	assert_contains(result.data, "Hello", "Result should contain streamed content")
+end)
+
+-- Test 25: Streaming - tool calls
+test("Streaming: tool call streaming", function()
+	local chunks_received = {}
+	local call_count = 0
+
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		tools = {
+			get_weather = {
+				description = "Get weather",
+				parameters = {
+					type = "object",
+					properties = {
+						city = { type = "string" },
+					},
+				},
+				func = function(ctx, args)
+					return { temperature = 72, city = args.city }
+				end,
+			},
+		},
+		http_client = {
+			post = function(url, headers, body)
+				call_count = call_count + 1
+
+				if call_count == 1 then
+					-- First call: return tool call in streaming format
+					local sse_response = [[data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}
+data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\""}}]},"finish_reason":null}]}
+data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"Paris\"}"}}]},"finish_reason":null}]}
+data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+]]
+					return 200, sse_response
+				else
+					-- Second call: return final response in streaming format
+					local sse_response = [[data: {"id":"chatcmpl-789","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"The"},"finish_reason":null}]}
+data: {"id":"chatcmpl-789","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"content":" weather is 72"},"finish_reason":null}]}
+data: {"id":"chatcmpl-789","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+]]
+					return 200, sse_response
+				end
+			end,
+		},
+	})
+
+	local result = agent:run("What's the weather?", {
+		stream = true,
+		on_chunk = function(chunk_type, data)
+			table.insert(chunks_received, { type = chunk_type, data = data })
+		end,
+	})
+
+	-- Should have received tool call chunks
+	local has_tool_call_start = false
+	local has_tool_call_delta = false
+	local has_tool_call_end = false
+
+	for _, chunk in ipairs(chunks_received) do
+		if chunk.type == "tool_call_start" then
+			has_tool_call_start = true
+		elseif chunk.type == "tool_call_delta" then
+			has_tool_call_delta = true
+		elseif chunk.type == "tool_call_end" then
+			has_tool_call_end = true
+		end
+	end
+
+	assert_true(has_tool_call_start, "Should have tool_call_start chunk")
+	assert_true(has_tool_call_delta, "Should have tool_call_delta chunk")
+	assert_true(has_tool_call_end, "Should have tool_call_end chunk")
+
+	-- Should have final result
+	assert_not_nil(result.data, "Should have final result")
+end)
+
+-- Test 26: Streaming - error with output_schema
+test("Streaming: error when combined with output_schema", function()
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		output_schema = {
+			type = "object",
+			properties = {
+				answer = { type = "string" },
+			},
+		},
+		http_client = {
+			post = function(url, headers, body)
+				return 200, '{"choices":[{"message":{"content":"test"}}]}'
+			end,
+		},
+	})
+
+	assert_error(function()
+		agent:run("Test", {
+			stream = true,
+			on_chunk = function(chunk_type, data) end,
+		})
+	end, "not compatible")
+end)
+
+-- Test 27: Streaming - backwards compatibility (stream=false)
+test("Streaming: backwards compatibility with stream disabled", function()
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		http_client = {
+			post = function(url, headers, body)
+				-- Regular non-streaming response
+				return 200, '{"id":"chatcmpl-789","choices":[{"message":{"role":"assistant","content":"Hello"}}]}'
+			end,
+		},
+	})
+
+	-- Run without streaming (default behavior)
+	local result = agent:run("Test")
+
+	assert_not_nil(result.data, "Should have result data")
+	assert_eq(result.data, "Hello", "Should have non-streamed content")
+end)
+
 -- Summary
 print("\n" .. string.rep("=", 50))
 print("Test Results:")

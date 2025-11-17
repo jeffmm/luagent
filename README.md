@@ -5,6 +5,7 @@ A portable, single-file Lua library for creating AI agents with structured input
 ## Features
 
 - **Structured Inputs/Outputs**: JSON schema validation for reliable, type-safe agent outputs
+- **Streaming Support**: Receive incremental responses with real-time callbacks for content and tool calls
 - **Dynamic Prompts**: System prompts can be static strings or functions that adapt based on runtime context
 - **Tool/Function Calling**: Define tools that agents can call to interact with external systems
 - **OpenAI-Compatible API**: Works with OpenAI, Ollama, Together AI, and other compatible providers
@@ -151,6 +152,44 @@ local agent = luagent.Agent.new({
 local result = agent:run("What's the weather in San Francisco?")
 -- Agent automatically calls the get_weather tool and uses the result
 ```
+
+### Streaming
+
+Receive incremental responses as they're generated:
+
+```lua
+local agent = luagent.Agent.new({
+  model = "gpt-4o-mini",
+  system_prompt = "You are a helpful assistant."
+})
+
+-- Stream the response
+local result = agent:run("Write a haiku about Lua", {
+  stream = true,
+  on_chunk = function(chunk_type, data)
+    if chunk_type == "content" then
+      -- Print each piece of text as it arrives
+      io.write(data.content)
+      io.flush()
+    elseif chunk_type == "tool_call_start" then
+      print("\n[Tool call: " .. data.id .. "]")
+    elseif chunk_type == "tool_call_delta" then
+      -- Show incremental tool arguments
+      io.write(data.arguments)
+      io.flush()
+    elseif chunk_type == "tool_call_end" then
+      print("\n[Tool completed: " .. data.tool_call["function"].name .. "]")
+    end
+  end
+})
+
+-- result.data contains the complete accumulated response
+print("\n\nComplete response:", result.data)
+```
+
+Streaming works with tool calling and the entire agent loop. See `examples/streaming_example.lua` for more examples.
+
+**Note:** Streaming is not compatible with `output_schema` (structured outputs).
 
 ### Dependency Injection
 
