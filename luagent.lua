@@ -52,7 +52,7 @@ local luagent = {}
 ---@field decode fun(str: string): any
 
 ---@class HTTPClient
----@field post fun(url: string, headers: table<string, string>, body: string): number, string
+---@field post fun(url: string, headers: table<string, string>, body: string, on_chunk: fun(chunk: string)?): number, string
 
 ---@class JSONSchema
 ---@field type string
@@ -190,7 +190,8 @@ local function load_http()
 	ok, result = pcall(require, "requests")
 	if ok then
 		return {
-			post = function(url, headers, body)
+			post = function(url, headers, body, on_chunk)
+				-- lua-requests doesn't support streaming
 				local resp = result.post({
 					url = url,
 					headers = headers,
@@ -205,9 +206,12 @@ local function load_http()
 	local https_ok, https_lib = pcall(require, "ssl.https")
 	local http_ok, http_lib = pcall(require, "socket.http")
 	if https_ok or http_ok then
-		local ltn12 = require("ltn12")
+		local ltn12_ok, ltn12 = pcall(require, "ltn12")
+		if not ltn12_ok then
+			return nil
+		end
 		return {
-			post = function(url, headers, body)
+			post = function(url, headers, body, on_chunk)
 				-- Detect if URL is HTTP or HTTPS
 				local is_https = url:match("^https://") ~= nil
 				local lib
@@ -223,12 +227,28 @@ local function load_http()
 				end
 
 				local response_body = {}
+				local sink
+
+				if on_chunk then
+					-- Streaming mode: call on_chunk for each chunk as it arrives
+					sink = function(chunk, err)
+						if chunk then
+							table.insert(response_body, chunk)
+							on_chunk(chunk)
+						end
+						return 1
+					end
+				else
+					-- Non-streaming mode: buffer everything
+					sink = ltn12.sink.table(response_body)
+				end
+
 				local _, status = lib.request({
 					url = url,
 					method = "POST",
 					headers = headers,
 					source = ltn12.source.string(body),
-					sink = ltn12.sink.table(response_body),
+					sink = sink,
 				})
 				return status, table.concat(response_body)
 			end,
@@ -301,6 +321,49 @@ local function parse_sse(sse_text)
 	end
 
 	return chunks
+end
+
+---Create an incremental SSE parser for real-time streaming
+---@param on_event fun(chunk: table) Callback for each parsed SSE event
+---@return fun(data: string) Function to feed data chunks
+local function create_sse_parser(on_event)
+	local buffer = ""
+
+	return function(data)
+		buffer = buffer .. data
+
+		-- Process complete lines
+		while true do
+			local line_end = buffer:find("[\r\n]")
+			if not line_end then
+				break
+			end
+
+			local line = buffer:sub(1, line_end - 1)
+			buffer = buffer:sub(line_end + 1)
+
+			-- Skip empty lines
+			if line ~= "" and line ~= "\r" then
+				-- SSE lines start with "data: "
+				if line:match("^data: ") then
+					local data_content = line:sub(7) -- Remove "data: " prefix
+
+					-- Check for [DONE] marker
+					if data_content == "[DONE]" then
+						return true -- Signal completion
+					end
+
+					-- Parse JSON chunk
+					local ok, chunk = pcall(json.decode, data_content)
+					if ok then
+						on_event(chunk)
+					end
+				end
+			end
+		end
+
+		return false -- Not done yet
+	end
 end
 
 ---Detects available AI provider based on environment variables.
@@ -458,8 +521,8 @@ end
 ---@field model string
 ---@field system_prompt? string|fun(ctx: RunContext): string
 ---@field output_schema? JSONSchema
----@field tools table<string, ToolDefinition>
----@field base_url string
+---@field tools? table<string, ToolDefinition>
+---@field base_url? string
 ---@field api_key? string
 ---@field temperature? number
 ---@field max_tokens? number
@@ -539,7 +602,8 @@ function Agent:_build_system_prompt(ctx)
 	-- Add instruction for output tool if structured output is enabled
 	if self._output_tool_name then
 		local output_instruction = "\n\nWhen you are ready to provide your final answer, you MUST call the '"
-			.. self._output_tool_name .. "' function with the structured data."
+			.. self._output_tool_name
+			.. "' function with the structured data."
 		base_prompt = base_prompt .. output_instruction
 	end
 
@@ -619,16 +683,137 @@ function Agent:_call_openai_api(messages, tools, deps, stream, on_chunk)
 	}
 
 	local http_client = self.http_client or get_http()
-	local status, response_body = http_client.post(url, headers, body_str)
 
-	if status ~= 200 then
-		error("OpenAI API error (status " .. status .. "): " .. response_body)
-	end
-
-	-- Handle streaming response
+	-- Handle streaming with real-time processing
 	if stream and on_chunk then
-		return self:_process_streaming_response(response_body, on_chunk)
+		-- Accumulated state for final response
+		local accumulated_content = ""
+		local accumulated_tool_calls = {}
+		local response_id = nil
+		local response_model = nil
+		local finish_reason = nil
+
+		-- Create incremental SSE parser
+		local parse_chunk = create_sse_parser(function(chunk)
+			-- Process each chunk immediately as it arrives
+			if chunk.id then
+				response_id = chunk.id
+			end
+			if chunk.model then
+				response_model = chunk.model
+			end
+
+			local choices = chunk.choices or {}
+			for _, choice in ipairs(choices) do
+				local delta = choice.delta or {}
+
+				if choice.finish_reason then
+					finish_reason = choice.finish_reason
+				end
+
+				-- Content delta
+				if delta.content then
+					accumulated_content = accumulated_content .. delta.content
+					on_chunk("content", { content = delta.content })
+				end
+
+				-- Tool call delta
+				if delta.tool_calls then
+					for _, tc_delta in ipairs(delta.tool_calls) do
+						local index = tc_delta.index
+
+						if not accumulated_tool_calls[index] then
+							accumulated_tool_calls[index] = {
+								id = tc_delta.id or "",
+								type = "function",
+								["function"] = {
+									name = "",
+									arguments = "",
+								},
+							}
+
+							on_chunk("tool_call_start", {
+								index = index,
+								id = accumulated_tool_calls[index].id,
+							})
+						end
+
+						local tc = accumulated_tool_calls[index]
+
+						if tc_delta.id then
+							tc.id = tc_delta.id
+						end
+
+						if tc_delta["function"] then
+							if tc_delta["function"].name then
+								tc["function"].name = tc["function"].name .. tc_delta["function"].name
+							end
+							if tc_delta["function"].arguments then
+								tc["function"].arguments = tc["function"].arguments .. tc_delta["function"].arguments
+
+								on_chunk("tool_call_delta", {
+									index = index,
+									arguments = tc_delta["function"].arguments,
+								})
+							end
+						end
+					end
+				end
+			end
+		end)
+
+		-- Make streaming HTTP request
+		local status, response_body = http_client.post(url, headers, body_str, parse_chunk)
+
+		if status ~= 200 then
+			error("OpenAI API error (status " .. status .. "): " .. response_body)
+		end
+
+		-- Emit tool_call_end events for completed tool calls
+		for index, tool_call in pairs(accumulated_tool_calls) do
+			on_chunk("tool_call_end", {
+				index = index,
+				tool_call = tool_call,
+			})
+		end
+
+		-- Return complete response in OpenAI API format
+		local final_message = {
+			role = "assistant",
+		}
+		if accumulated_content ~= "" then
+			final_message.content = accumulated_content
+		end
+
+		local tool_calls_array = {}
+		for _, tc in pairs(accumulated_tool_calls) do
+			table.insert(tool_calls_array, tc)
+		end
+		if #tool_calls_array > 0 then
+			final_message.tool_calls = tool_calls_array
+		end
+
+		return {
+			id = response_id or "chatcmpl-streaming",
+			object = "chat.completion",
+			created = os.time(),
+			model = response_model or self.model,
+			choices = {
+				{
+					index = 0,
+					message = final_message,
+					finish_reason = finish_reason or "stop",
+				},
+			},
+		}
 	else
+		-- Non-streaming request
+		local status, response_body = http_client.post(url, headers, body_str)
+
+		if status ~= 200 then
+			error("OpenAI API error (status " .. status .. "): " .. response_body)
+		end
+
 		return json.decode(response_body)
 	end
 end

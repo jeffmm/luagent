@@ -549,13 +549,17 @@ test("Streaming: basic content streaming", function()
 	local agent = luagent.Agent.new({
 		model = "gpt-4",
 		http_client = {
-			post = function(url, headers, body)
+			post = function(url, headers, body, on_chunk)
 				-- Return a mock SSE response
 				local sse_response = [[data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}
 data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"content":" World"},"finish_reason":null}]}
 data: {"id":"chatcmpl-123","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 data: [DONE]
 ]]
+				-- Simulate streaming by calling on_chunk with the response
+				if on_chunk then
+					on_chunk(sse_response)
+				end
 				return 200, sse_response
 			end,
 		},
@@ -608,7 +612,7 @@ test("Streaming: tool call streaming", function()
 			},
 		},
 		http_client = {
-			post = function(url, headers, body)
+			post = function(url, headers, body, on_chunk)
 				call_count = call_count + 1
 
 				if call_count == 1 then
@@ -619,6 +623,9 @@ data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890
 data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 data: [DONE]
 ]]
+					if on_chunk then
+						on_chunk(sse_response)
+					end
 					return 200, sse_response
 				else
 					-- Second call: return final response in streaming format
@@ -627,6 +634,9 @@ data: {"id":"chatcmpl-789","object":"chat.completion.chunk","created":1234567890
 data: {"id":"chatcmpl-789","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
 data: [DONE]
 ]]
+					if on_chunk then
+						on_chunk(sse_response)
+					end
 					return 200, sse_response
 				end
 			end,
@@ -777,7 +787,7 @@ test("Tool-based output: streaming structured output", function()
 			},
 		},
 		http_client = {
-			post = function(url, headers, body)
+			post = function(url, headers, body, on_chunk)
 				-- Mock streaming response with output tool call
 				local sse_response = [[data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_xyz","type":"function","function":{"name":"final_answer","arguments":""}}]},"finish_reason":null}]}
 data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"result\""}}]},"finish_reason":null}]}
@@ -785,6 +795,9 @@ data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890
 data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
 data: [DONE]
 ]]
+				if on_chunk then
+					on_chunk(sse_response)
+				end
 				return 200, sse_response
 			end,
 		},

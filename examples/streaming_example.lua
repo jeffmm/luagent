@@ -11,6 +11,9 @@
 
 local luagent = require("luagent")
 
+-- Disable output buffering so streaming is visible in real-time
+io.stdout:setvbuf("no")
+
 -- Example 1: Basic streaming with content
 local function example_basic_streaming()
 	print("\n=== Example 1: Basic Content Streaming ===\n")
