@@ -52,7 +52,11 @@ print(result.data)  -- "The capital of France is Paris."
 
 ## Examples
 
-In the `examples` directory, see `example.lua` for basic examples, and `weather_agent.lua`.
+In the `examples` directory, see `examples.lua` for basic examples, and `weather_agent.lua` for a weather agent demo.
+
+```bash
+eval "$(luarocks path)" && lua examples/examples.lua
+```
 
 ### Weather Agent Example
 
@@ -60,7 +64,7 @@ A complete weather agent that demonstrates tool chaining, dependency injection, 
 
 ```bash
 # Run the weather agent with your local llama.cpp server
-eval "$(luarocks path)" && lua weather_agent.lua
+eval "$(luarocks path)" && lua examples/weather_agent.lua
 ```
 
 See [examples/README.md](examples/README.md) for detailed documentation.
