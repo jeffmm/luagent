@@ -465,8 +465,12 @@ end
 ---@field max_tokens? number
 ---@field http_client? HTTPClient
 ---@field _tool_map table<string, ToolDefinition>
+---@field _output_tool_name? string
 local Agent = {}
 Agent.__index = Agent
+
+-- Special tool name for structured output
+local OUTPUT_TOOL_NAME = "final_answer"
 
 ---@param config AgentConfig
 ---@return Agent
@@ -488,10 +492,25 @@ function Agent.new(config)
 
 	-- Internal state
 	self._tool_map = {}
+	self._output_tool_name = nil
 
 	-- Register tools
 	for tool_name, tool_config in pairs(self.tools) do
 		self:_register_tool(tool_name, tool_config)
+	end
+
+	-- If output_schema is provided, register a special output tool
+	if self.output_schema then
+		self._output_tool_name = OUTPUT_TOOL_NAME
+		self:_register_tool(OUTPUT_TOOL_NAME, {
+			description = "Call this function to return your final answer with structured data",
+			parameters = self.output_schema,
+			func = function(ctx, args)
+				-- This tool's execution is handled specially in the run loop
+				-- We just validate and return the args
+				return args
+			end,
+		})
 	end
 
 	return self
@@ -510,11 +529,21 @@ end
 ---@param ctx RunContext
 ---@return string
 function Agent:_build_system_prompt(ctx)
+	local base_prompt = ""
 	if type(self.system_prompt) == "function" then
-		return self.system_prompt(ctx)
+		base_prompt = self.system_prompt(ctx)
 	else
-		return self.system_prompt or ""
+		base_prompt = self.system_prompt or ""
 	end
+
+	-- Add instruction for output tool if structured output is enabled
+	if self._output_tool_name then
+		local output_instruction = "\n\nWhen you are ready to provide your final answer, you MUST call the '"
+			.. self._output_tool_name .. "' function with the structured data."
+		base_prompt = base_prompt .. output_instruction
+	end
+
+	return base_prompt
 end
 
 ---@return table[]
@@ -565,23 +594,14 @@ function Agent:_call_openai_api(messages, tools, deps, stream, on_chunk)
 	-- Add streaming if requested
 	if stream then
 		request_body.stream = true
-		-- Note: structured output with json_schema is not compatible with streaming in OpenAI API
-		if self.output_schema then
-			error("Streaming is not compatible with output_schema (json_schema response format)")
-		end
-	else
-		-- Add structured output if schema is provided (only for non-streaming)
-		if self.output_schema then
-			request_body.response_format = {
-				type = "json_schema",
-				json_schema = {
-					name = "output",
-					strict = true,
-					schema = self.output_schema,
-				},
-			}
-		end
 	end
+
+	-- Note: We no longer use response_format for structured output.
+	-- Instead, we use a tool-based approach where output_schema is registered
+	-- as a special "final_answer" tool. This approach:
+	-- 1. Works with streaming (tool calls can be streamed)
+	-- 2. Is provider-independent (works with any model supporting tool calling)
+	-- 3. Allows mixing structured output with regular tools
 
 	local body_str = json.encode(request_body)
 
@@ -814,7 +834,36 @@ function Agent:run(prompt, options)
 
 		-- Check if there are tool calls
 		if message.tool_calls then
-			-- Execute each tool call
+			-- Check if any tool call is the output tool (for structured output)
+			local output_tool_call = nil
+			if self._output_tool_name then
+				for _, tool_call in ipairs(message.tool_calls) do
+					if tool_call["function"].name == self._output_tool_name then
+						output_tool_call = tool_call
+						break
+					end
+				end
+			end
+
+			-- If output tool was called, return the structured result immediately
+			if output_tool_call then
+				local tool_args_str = output_tool_call["function"].arguments
+				local parsed = json.decode(tool_args_str)
+
+				-- Validate against schema
+				local ok, err = validate_schema(parsed, self.output_schema)
+				if not ok then
+					error("Output validation failed: " .. err)
+				end
+
+				return {
+					data = parsed,
+					messages = messages,
+					raw_response = response,
+				}
+			end
+
+			-- Execute regular tool calls (non-output tools)
 			for _, tool_call in ipairs(message.tool_calls) do
 				local result = self:_execute_tool_call(tool_call, ctx)
 
@@ -831,28 +880,18 @@ function Agent:run(prompt, options)
 			-- No more tool calls, we're done
 			local content = message.content
 
-			-- Parse structured output if schema is provided
-			if self.output_schema and content then
-				local parsed = json.decode(content)
-
-				-- Validate against schema
-				local ok, err = validate_schema(parsed, self.output_schema)
-				if not ok then
-					error("Output validation failed: " .. err)
-				end
-
-				return {
-					data = parsed,
-					messages = messages,
-					raw_response = response,
-				}
-			else
-				return {
-					data = content,
-					messages = messages,
-					raw_response = response,
-				}
+			-- If output_schema is set, we expect the output tool to be called
+			-- If we reach here, the model didn't use the output tool
+			if self.output_schema then
+				error("Model did not call the '" .. self._output_tool_name .. "' tool for structured output")
 			end
+
+			-- Return plain text content
+			return {
+				data = content,
+				messages = messages,
+				raw_response = response,
+			}
 		end
 	end
 

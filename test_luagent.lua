@@ -663,8 +663,8 @@ data: [DONE]
 	assert_not_nil(result.data, "Should have final result")
 end)
 
--- Test 26: Streaming - error with output_schema
-test("Streaming: error when combined with output_schema", function()
+-- Test 26: Tool-based output - auto-registration
+test("Tool-based output: output tool auto-registered", function()
 	local agent = luagent.Agent.new({
 		model = "gpt-4",
 		output_schema = {
@@ -673,19 +673,12 @@ test("Streaming: error when combined with output_schema", function()
 				answer = { type = "string" },
 			},
 		},
-		http_client = {
-			post = function(url, headers, body)
-				return 200, '{"choices":[{"message":{"content":"test"}}]}'
-			end,
-		},
 	})
 
-	assert_error(function()
-		agent:run("Test", {
-			stream = true,
-			on_chunk = function(chunk_type, data) end,
-		})
-	end, "not compatible")
+	-- Output tool should be auto-registered
+	assert_not_nil(agent._output_tool_name, "Output tool name should be set")
+	assert_not_nil(agent._tool_map[agent._output_tool_name], "Output tool should be registered")
+	assert_eq(agent._tool_map[agent._output_tool_name].parameters, agent.output_schema, "Output tool parameters should match schema")
 end)
 
 -- Test 27: Streaming - backwards compatibility (stream=false)
@@ -705,6 +698,237 @@ test("Streaming: backwards compatibility with stream disabled", function()
 
 	assert_not_nil(result.data, "Should have result data")
 	assert_eq(result.data, "Hello", "Should have non-streamed content")
+end)
+
+-- Test 28: Tool-based output - system prompt modification
+test("Tool-based output: system prompt includes output tool instruction", function()
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		system_prompt = "You are helpful",
+		output_schema = {
+			type = "object",
+			properties = {
+				answer = { type = "string" },
+			},
+		},
+	})
+
+	local ctx = luagent.RunContext.new({})
+	local prompt = agent:_build_system_prompt(ctx)
+
+	assert_contains(prompt, "You are helpful", "Should include base system prompt")
+	assert_contains(prompt, "final_answer", "Should mention output tool name")
+	assert_contains(prompt, "MUST call", "Should instruct to call the tool")
+end)
+
+-- Test 29: Tool-based output - non-streaming execution
+test("Tool-based output: non-streaming structured output", function()
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		output_schema = {
+			type = "object",
+			properties = {
+				answer = { type = "string" },
+				confidence = { type = "number" },
+			},
+			required = { "answer" },
+		},
+		http_client = {
+			post = function(url, headers, body)
+				-- Mock response with output tool call
+				return 200, [[{
+					"id": "chatcmpl-123",
+					"choices": [{
+						"message": {
+							"role": "assistant",
+							"content": null,
+							"tool_calls": [{
+								"id": "call_abc",
+								"type": "function",
+								"function": {
+									"name": "final_answer",
+									"arguments": "{\"answer\":\"42\",\"confidence\":0.95}"
+								}
+							}]
+						}
+					}]
+				}]]
+			end,
+		},
+	})
+
+	local result = agent:run("What is the answer?")
+
+	assert_not_nil(result.data, "Should have structured data")
+	assert_eq(result.data.answer, "42", "Should have correct answer")
+	assert_eq(result.data.confidence, 0.95, "Should have correct confidence")
+end)
+
+-- Test 30: Tool-based output - streaming structured output
+test("Tool-based output: streaming structured output", function()
+	local chunks_received = {}
+
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		output_schema = {
+			type = "object",
+			properties = {
+				result = { type = "string" },
+			},
+		},
+		http_client = {
+			post = function(url, headers, body)
+				-- Mock streaming response with output tool call
+				local sse_response = [[data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_xyz","type":"function","function":{"name":"final_answer","arguments":""}}]},"finish_reason":null}]}
+data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"result\""}}]},"finish_reason":null}]}
+data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"Success\"}"}}]},"finish_reason":null}]}
+data: {"id":"chatcmpl-456","object":"chat.completion.chunk","created":1234567890,"model":"gpt-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+]]
+				return 200, sse_response
+			end,
+		},
+	})
+
+	local result = agent:run("Test query", {
+		stream = true,
+		on_chunk = function(chunk_type, data)
+			table.insert(chunks_received, { type = chunk_type, data = data })
+		end,
+	})
+
+	-- Should receive tool call chunks during streaming
+	local has_tool_chunks = false
+	for _, chunk in ipairs(chunks_received) do
+		if chunk.type == "tool_call_start" or chunk.type == "tool_call_delta" or chunk.type == "tool_call_end" then
+			has_tool_chunks = true
+			break
+		end
+	end
+	assert_true(has_tool_chunks, "Should receive tool call chunks during streaming")
+
+	-- Final result should be validated structured data
+	assert_not_nil(result.data, "Should have structured data")
+	assert_eq(result.data.result, "Success", "Should have correct structured result")
+end)
+
+-- Test 31: Tool-based output - validation failure
+test("Tool-based output: schema validation failure", function()
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		output_schema = {
+			type = "object",
+			properties = {
+				count = { type = "number" },
+			},
+			required = { "count" },
+		},
+		http_client = {
+			post = function(url, headers, body)
+				-- Mock response with invalid data (missing required field)
+				return 200, [[{
+					"id": "chatcmpl-789",
+					"choices": [{
+						"message": {
+							"role": "assistant",
+							"content": null,
+							"tool_calls": [{
+								"id": "call_def",
+								"type": "function",
+								"function": {
+									"name": "final_answer",
+									"arguments": "{\"wrong_field\":\"value\"}"
+								}
+							}]
+						}
+					}]
+				}]]
+			end,
+		},
+	})
+
+	assert_error(function()
+		agent:run("Test")
+	end, "validation failed")
+end)
+
+-- Test 32: Tool-based output - mixing with regular tools
+test("Tool-based output: can use regular tools before final answer", function()
+	local get_weather_called = false
+
+	local agent = luagent.Agent.new({
+		model = "gpt-4",
+		output_schema = {
+			type = "object",
+			properties = {
+				summary = { type = "string" },
+			},
+		},
+		tools = {
+			get_weather = {
+				description = "Get weather",
+				parameters = {
+					type = "object",
+					properties = {
+						city = { type = "string" },
+					},
+				},
+				func = function(ctx, args)
+					get_weather_called = true
+					return { temp = 75, city = args.city }
+				end,
+			},
+		},
+		http_client = {
+			post = function(url, headers, body)
+				-- First call: use regular tool
+				if not get_weather_called then
+					return 200, [[{
+						"id": "chatcmpl-1",
+						"choices": [{
+							"message": {
+								"role": "assistant",
+								"content": null,
+								"tool_calls": [{
+									"id": "call_1",
+									"type": "function",
+									"function": {
+										"name": "get_weather",
+										"arguments": "{\"city\":\"NYC\"}"
+									}
+								}]
+							}
+						}]
+					}]]
+				else
+					-- Second call: use output tool
+					return 200, [[{
+						"id": "chatcmpl-2",
+						"choices": [{
+							"message": {
+								"role": "assistant",
+								"content": null,
+								"tool_calls": [{
+									"id": "call_2",
+									"type": "function",
+									"function": {
+										"name": "final_answer",
+										"arguments": "{\"summary\":\"Weather is 75 in NYC\"}"
+									}
+								}]
+							}
+						}]
+					}]]
+				end
+			end,
+		},
+	})
+
+	local result = agent:run("What's the weather?")
+
+	assert_true(get_weather_called, "Regular tool should be called")
+	assert_not_nil(result.data, "Should have structured output")
+	assert_eq(result.data.summary, "Weather is 75 in NYC", "Should have final structured answer")
 end)
 
 -- Summary

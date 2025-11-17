@@ -4,8 +4,9 @@ A portable, single-file Lua library for creating AI agents with structured input
 
 ## Features
 
-- **Structured Inputs/Outputs**: JSON schema validation for reliable, type-safe agent outputs
+- **Structured Inputs/Outputs**: JSON schema validation for reliable, type-safe agent outputs using tool-based approach
 - **Streaming Support**: Receive incremental responses with real-time callbacks for content and tool calls
+- **Streaming + Structured Output**: Get validated structured responses while streaming (unique provider-independent approach)
 - **Dynamic Prompts**: System prompts can be static strings or functions that adapt based on runtime context
 - **Tool/Function Calling**: Define tools that agents can call to interact with external systems
 - **OpenAI-Compatible API**: Works with OpenAI, Ollama, Together AI, and other compatible providers
@@ -97,6 +98,13 @@ print(result.data.confidence)  -- 0.95
 print(result.data.reasoning)   -- "The phrase 'I love' indicates strong positive sentiment"
 ```
 
+**How it works:** luagent uses a tool-based approach for structured outputs, inspired by [Pydantic AI](https://ai.pydantic.dev/output/#output-modes). When you provide an `output_schema`, the library automatically registers a special `final_answer` tool with your schema as its parameters. The model calls this tool when ready to return structured data.
+
+**Benefits:**
+- ✅ **Streaming compatible**: Tool calls can be streamed, so structured outputs work with `stream=true`
+- ✅ **Provider-independent**: Works with any model that supports tool calling (OpenAI, Ollama, Together AI, etc.)
+- ✅ **Mix with regular tools**: Use other tools alongside structured output in the same agent
+
 ### Dynamic System Prompts
 
 Adapt agent behavior based on runtime context:
@@ -187,9 +195,7 @@ local result = agent:run("Write a haiku about Lua", {
 print("\n\nComplete response:", result.data)
 ```
 
-Streaming works with tool calling and the entire agent loop. See `examples/streaming_example.lua` for more examples.
-
-**Note:** Streaming is not compatible with `output_schema` (structured outputs).
+Streaming works with tool calling, structured outputs, and the entire agent loop. See `examples/streaming_example.lua` for more examples, including streaming with structured outputs.
 
 ### Dependency Injection
 
@@ -365,9 +371,9 @@ All tests should pass:
 ```
 ==================================================
 Test Results:
-  Passed: 22
+  Passed: 32
   Failed: 0
-  Total:  22
+  Total:  32
 ==================================================
 ```
 
@@ -379,9 +385,10 @@ luagent is designed to be simple and hackable:
 2. **RunContext**: Carries dependencies and state through the execution
 3. **Agent**: Orchestrates the conversation loop with the LLM
 4. **Tool Execution**: Handles function calling with error handling
-5. **HTTP/JSON Abstraction**: Works with multiple library implementations
+5. **Tool-Based Structured Output**: Uses function calling for provider-independent structured outputs
+6. **HTTP/JSON Abstraction**: Works with multiple library implementations
 
-The entire implementation is ~450 lines of Lua code in a single file.
+The entire implementation is ~900 lines of Lua code in a single file.
 
 ## Design Philosophy
 
@@ -395,7 +402,6 @@ The entire implementation is ~450 lines of Lua code in a single file.
 
 Current limitations (may be addressed in future versions):
 
-- No streaming support (single response only)
 - No async/concurrent execution (Lua limitation)
 - Basic JSON schema validation (subset of full spec)
 - No built-in retry/rate limiting
