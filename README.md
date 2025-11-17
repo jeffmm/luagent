@@ -1,6 +1,6 @@
 # luagent
 
-A portable, single-file Lua library for creating composable AI agents with structured inputs/outputs and dynamic prompts. Inspired by Pydantic AI, designed to be a lightweight, functional drop-in replacement for building agents in Lua.
+A portable, single-file Lua library for creating AI agents with structured inputs/outputs and dynamic prompts. Inspired by [Pydantic AI](https://ai.pydantic.dev), designed to be a lightweight, functional drop-in dependency for building agents in Lua.
 
 ## Features
 
@@ -42,8 +42,6 @@ local luagent = require('luagent')
 -- Create a simple agent
 local agent = luagent.Agent.new({
   model = "gpt-4o-mini",
-  base_url = "https://api.openai.com/v1",
-  api_key = os.getenv("OPENAI_API_KEY"),
   system_prompt = "You are a helpful assistant."
 })
 
@@ -54,7 +52,7 @@ print(result.data)  -- "The capital of France is Paris."
 
 ## Examples
 
-See `example.lua` for basic examples, and `weather_agent.lua` for a complete, real-world example inspired by Pydantic AI.
+In the `examples` directory, see `example.lua` for basic examples, and `weather_agent.lua`.
 
 ### Weather Agent Example
 
@@ -65,7 +63,7 @@ A complete weather agent that demonstrates tool chaining, dependency injection, 
 eval "$(luarocks path)" && lua weather_agent.lua
 ```
 
-See [WEATHER_EXAMPLE.md](WEATHER_EXAMPLE.md) for detailed documentation.
+See [examples/README.md](examples/README.md) for detailed documentation.
 
 ### Structured Output
 
@@ -313,20 +311,20 @@ Run the test suite:
 
 ```bash
 # Install test dependencies
-luarocks install dkjson
+luarocks install dkjson luasec luasocket
 
 # Run tests
-eval "$(luarocks path)" && lua luagent_test.lua
+eval "$(luarocks path)" && lua test_luagent.lua
 ```
 
-All 20 tests should pass:
+All tests should pass:
 
 ```
 ==================================================
 Test Results:
-  Passed: 20
+  Passed: 22
   Failed: 0
-  Total:  20
+  Total:  22
 ==================================================
 ```
 
@@ -340,21 +338,7 @@ luagent is designed to be simple and hackable:
 4. **Tool Execution**: Handles function calling with error handling
 5. **HTTP/JSON Abstraction**: Works with multiple library implementations
 
-The entire implementation is ~450 lines of well-commented Lua code in a single file.
-
-## Comparison with Pydantic AI
-
-| Feature | Pydantic AI | luagent |
-|---------|-------------|---------|
-| Language | Python | Lua |
-| Structured Outputs | ✅ Pydantic models | ✅ JSON schemas |
-| Dynamic Prompts | ✅ Functions | ✅ Functions |
-| Tool Calling | ✅ Decorators | ✅ Table config |
-| Dependency Injection | ✅ Type-safe | ✅ Context-based |
-| Streaming | ✅ | ❌ (future) |
-| Graph Support | ✅ | ❌ (future) |
-| File Size | Large framework | Single 450-line file |
-| Dependencies | Many | Optional (2-3) |
+The entire implementation is ~450 lines of Lua code in a single file.
 
 ## Design Philosophy
 
@@ -379,8 +363,8 @@ Current limitations (may be addressed in future versions):
 This is a single-file library by design. If you want to add features:
 
 1. Keep everything in `luagent.lua`
-2. Add tests to `luagent_test.lua`
-3. Update examples in `example.lua`
+2. Add tests to `test_luagent.lua`
+3. Update examples in `examples/`
 4. Maintain backwards compatibility
 5. Keep it simple and readable
 
@@ -393,7 +377,3 @@ MIT License - see LICENSE file for details
 - [Pydantic AI](https://ai.pydantic.dev/) - The Python library that inspired this project
 - [OpenAI API Reference](https://platform.openai.com/docs/api-reference)
 - [JSON Schema](https://json-schema.org/)
-
-## Author
-
-Created as a lightweight, portable alternative to Python agent frameworks for Lua developers who need composable AI agents without heavy dependencies.

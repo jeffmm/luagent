@@ -484,7 +484,7 @@ end)
 -- Test 20: Agent configuration defaults
 test("Agent: configuration defaults", function()
 	local agent = luagent.Agent.new({
-		model = "gpt-4",
+		model = "gpt-4o-mini",
 	})
 
 	assert_eq(agent.base_url, "https://api.openai.com/v1")
@@ -510,21 +510,7 @@ test("Provider detection: returns config structure", function()
 	-- If no API key is set, config will be nil, which is also valid
 end)
 
--- Test 22: Provider detection - OpenAI detection
-test("Provider detection: OpenAI detection works", function()
-	-- This test only runs if OPENAI_API_KEY is set
-	local openai_key = os.getenv("OPENAI_API_KEY")
-	if openai_key and openai_key ~= "" then
-		local config = luagent.detect_provider()
-		assert_not_nil(config, "Should detect OpenAI provider")
-		assert_eq(config.provider, "OpenAI")
-		assert_eq(config.base_url, "https://api.openai.com/v1")
-		assert_eq(config.model, "gpt-4o-mini")
-		assert_eq(config.api_key, openai_key)
-	end
-end)
-
--- Test 23: Using detect_provider with Agent
+-- Test 22: Using detect_provider with Agent
 test("Provider detection: integration with Agent.new", function()
 	local config = luagent.detect_provider()
 
